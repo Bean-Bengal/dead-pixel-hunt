@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dead Pixel Hunt</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;font-family:system-ui,sans-serif}
+#stage{position:fixed;inset:0;background:#000;touch-action:none}
+#bar{position:fixed;left:0;right:0;top:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;background:rgba(128,128,128,.75);color:#fff;font-size:14px;z-index:5}
+#bar button,#panel button{min-height:44px;padding:0 14px;font-size:15px;border:2px solid #fff;background:#222;color:#fff;border-radius:6px}
+#bar button:active,#panel button:active{background:#555}
+button:focus-visible,#box:focus-visible{outline:3px solid #0ff;outline-offset:3px}
+#banner{padding:4px 8px;border-radius:4px;font-weight:bold}
+.ok{background:#1a7f37}.bad{background:#c00}
+#box{position:absolute;width:40px;height:40px;border:2px solid #888;cursor:grab;z-index:4;touch-action:none;animation:fl .5s steps(1) infinite}
+@keyframes fl{0%{background:#fff}50%{background:#000}}
+#hint{position:fixed;bottom:8px;left:8px;right:8px;color:#fff;background:rgba(0,0,0,.6);padding:6px 8px;font-size:13px;z-index:5;border-radius:4px}
+#panel{position:fixed;right:8px;bottom:70px;max-width:calc(100% - 16px);background:rgba(0,0,0,.75);color:#fff;padding:8px;border-radius:6px;z-index:5;font-size:13px;display:flex;flex-direction:column;gap:6px}
+#panel .row{display:flex;gap:6px;flex-wrap:wrap}
+#panel button{min-height:44px;padding:0 10px;font-size:13px}
+#panel button.ok{background:#1a7f37}#panel button.bad{background:#c00}
+</style></head><body>
+<div id="stage"></div>
+<div id="bar">
+<button id="prev">Previous</button><button id="next">Next colour</button>
+<button id="fs">Fullscreen</button><span id="name"></span><span id="banner" role="status"></span>
+</div>
+<div id="box" tabindex="0" role="button" aria-label="Flashing box. Arrow keys move it, shift for big steps."></div>
+<div id="panel"><div class="row" id="results"></div><div id="pos"></div><button id="clear">Clear results</button></div>
+<div id="hint">Click background, Space, or Left/Right to change colour. Drag the box over the bad pixel, or focus it and use arrow keys (Shift = 10x).</div>
+<script>
+const COLOURS=[["black","#000000"],["white","#ffffff"],["red","#ff0000"],["green","#00ff00"],["blue","#0000ff"]];
+const KEY="deadPixelHuntV1";
+const BOXSIZE=40;
+function stepColour(i,d,n){return(((i+d)%n)+n)%n}
+function clampBox(x,y,s,w,h){return{x:Math.max(0,Math.min(x,w-s)),y:Math.max(0,Math.min(y,h-s))}}
+function keyMove(key,shift){const k=shift?10:1;return({ArrowLeft:[-k,0],ArrowRight:[k,0],ArrowUp:[0,-k],ArrowDown:[0,k]})[key]||null}
+// pixel (px,py) is covered by a box at (x,y) of size s when x<=px<x+s and y<=py<y+s
+function pixelInBox(px,py,x,y,s){return px>=x&&px<x+s&&py>=y&&py<y+s}
+// deliberately wrong version (off by one) used to prove the checker can fail
+function pixelInBoxBroken(px,py,x,y,s){return px>=x&&px<=x+s&&py>=y&&py<=y+s}
+function cleanSave(o,n){
+ const d={res:new Array(n).fill(null),x:100,y:150};
+ if(!o||typeof o!=="object")return d;
+ if(Array.isArray(o.res)&&o.res.length===n)d.res=o.res.map(v=>v==="pass"||v==="fail"?v:null);
+ if(Number.isFinite(o.x))d.x=o.x;
+ if(Number.isFinite(o.y))d.y=o.y;
+ return d;
+}
+// known answers: [name, actual, expected]
+function boundaryChecks(inFn){
+ const s=40,x=100,y=50;
+ return[
+  ["left edge pixel inside",inFn(100,60,x,y,s),true],
+  ["one left of edge outside",inFn(99,60,x,y,s),false],
+  ["last pixel right inside",inFn(139,60,x,y,s),true],
+  ["first pixel past right outside",inFn(140,60,x,y,s),false],
+  ["top edge pixel inside",inFn(120,50,x,y,s),true],
+  ["one above top outside",inFn(120,49,x,y,s),false],
+  ["last pixel bottom inside",inFn(120,89,x,y,s),true],
+  ["first pixel past bottom outside",inFn(120,90,x,y,s),false],
+  ["corner pixel inside",inFn(139,89,x,y,s),true],
+  ["diagonal past corner outside",inFn(140,90,x,y,s),false]
+ ];
+}
+function otherChecks(){
+ const n=COLOURS.length;
+ const a=clampBox(-5,10,40,100,100),b=clampBox(60,60,40,100,100),c=clampBox(59,60,40,100,100);
+ return[
+  ["wrap forward from last",stepColour(4,1,n),0],
+  ["forward to last",stepColour(3,1,n),4],
+  ["wrap back from first",stepColour(0,-1,n),4],
+  ["back from second",stepColour(1,-1,n),0],
+  ["clamp left",a.x===0&&a.y===10,true],
+  ["clamp at max edge ok",b.x===60&&b.y===60,true],
+  ["clamp one past max",clampBox(61,0,40,100,100).x,60],
+  ["one before max unchanged",c.x,59],
+  ["shift arrow is 10",JSON.stringify(keyMove("ArrowLeft",true)),"[-10,0]"],
+  ["other key ignored",keyMove("a",false),null],
+  ["five colours",COLOURS.length,5],
+  ["junk save length",cleanSave("junk",5).res.length,5],
+  ["bad result becomes null",cleanSave({res:["pass","x",null,"fail",null],x:5,y:"a"},5).res[1],null],
+  ["short res gives default x",cleanSave({res:["pass"],x:5},5).x,100]
+ ];
+}
+function failures(list){return list.filter(r=>r[1]!==r[2]).map(r=>r[0])}
+function selfTest(){
+ const bad=failures(boundaryChecks(pixelInBox)).concat(failures(otherChecks()));
+ // the broken version must be caught by the same checks
+ const caught=failures(boundaryChecks(pixelInBoxBroken)).length>0;
+ if(!caught)bad.push("checker failed to catch broken boundary");
+ return{ok:bad.length===0,bad:bad,total:boundaryChecks(pixelInBox).length+otherChecks().length+1};
+}
+const stage=document.getElementById("stage"),box=document.getElementById("box"),nm=document.getElementById("name"),ban=document.getElementById("banner");
+const prevBtn=document.getElementById("prev"),nextBtn=document.getElementById("next"),fsBtn=document.getElementById("fs");
+const resEl=document.getElementById("results"),posEl=document.getElementById("pos"),clearBtn=document.getElementById("clear");
+let save;
+try{save=cleanSave(JSON.parse(window.localStorage.getItem(KEY)),COLOURS.length)}catch(e){save=cleanSave(null,COLOURS.length)}
+function persist(){try{window.localStorage.setItem(KEY,JSON.stringify(save))}catch(e){}}
+let idx=0,bx=save.x,by=save.y;
+const st=selfTest();
+let pass=st.ok;
+function posText(){return"Box covers x "+Math.round(bx)+" to "+(Math.round(bx)+BOXSIZE-1)+", y "+Math.round(by)+" to "+(Math.round(by)+BOXSIZE-1)}
+function show(){stage.style.background=COLOURS[idx][1];nm.textContent=COLOURS[idx][0]+" ("+(idx+1)+"/"+COLOURS.length+")"}
+function renderPanel(){
+ resEl.innerHTML="";
+ COLOURS.forEach((c,i)=>{
+  const b=document.createElement("button");const r=save.res[i];
+  b.textContent=c[0]+": "+(r||"?");
+  b.className=r==="pass"?"ok":r==="fail"?"bad":"";
+  b.setAttribute("aria-label",c[0]+" test result "+(r||"not set")+". Press to change.");
+  b.onclick=()=>{save.res[i]=save.res[i]===null?"pass":save.res[i]==="pass"?"fail":null;persist();renderPanel()};
+  resEl.appendChild(b);
+ });
+ posEl.textContent=posText();
+}
+function place(x,y){const p=clampBox(x,y,BOXSIZE,window.innerWidth,window.innerHeight);bx=p.x;by=p.y;box.style.left=bx+"px";box.style.top=by+"px";save.x=bx;save.y=by;persist();posEl.textContent=posText()}
+function go(d){idx=stepColour(idx,d,COLOURS.length);show()}
+stage.addEventListener("click",()=>go(1));
+nextBtn.onclick=()=>go(1);prevBtn.onclick=()=>go(-1);
+clearBtn.onclick=()=>{save.res=new Array(COLOURS.length).fill(null);persist();renderPanel()};
+fsBtn.onclick=()=>{const e=document.documentElement;if(document.fullscreenElement)document.exitFullscreen();else if(e.requestFullscreen)e.requestFullscreen()};
+document.addEventListener("keydown",e=>{
+ if(e.target===box){const m=keyMove(e.key,e.shiftKey);if(m){e.preventDefault();place(bx+m[0],by+m[1])}return}
+ if(e.target.tagName==="BUTTON")return;
+ if(e.key==="ArrowRight"||e.key===" "){e.preventDefault();go(1)}
+ else if(e.key==="ArrowLeft"){e.preventDefault();go(-1)}
+});
+let drag=null;
+box.addEventListener("pointerdown",e=>{drag={dx:e.clientX-bx,dy:e.clientY-by};box.setPointerCapture(e.pointerId);box.focus();e.preventDefault()});
+box.addEventListener("pointermove",e=>{if(drag)place(e.clientX-drag.dx,e.clientY-drag.dy)});
+box.addEventListener("pointerup",()=>{drag=null});
+window.addEventListener("resize",()=>place(bx,by));
+show();place(bx,by);renderPanel();
+// live check: arrow key on the box still moves it by one pixel, then restore
+(function(){
+ const x0=bx,y0=by;
+ const key=x0>=1?"ArrowLeft":"ArrowRight";
+ box.dispatchEvent(new KeyboardEvent("keydown",{key:key,bubbles:true,cancelable:true}));
+ const moved=Math.abs(bx-x0)===1&&by===y0;
+ place(x0,y0);
+ if(!moved){pass=false;st.bad.push("arrow key moves box one pixel")}
+})();
+ban.textContent=pass?"self-test pass ("+st.total+" checks)":"self-test FAIL: "+st.bad.join(", ");
+ban.className=pass?"ok":"bad";
+</script></body></html>
